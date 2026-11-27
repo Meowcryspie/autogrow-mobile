@@ -7,6 +7,7 @@
     "expo": "~58.0.26",
     "expo-secure-store": "~58.0.3",
     "expo-status-bar": "~58.0.5",
+    "expo-updates": "~58.0.23",
     "lucide-react-native": "^1.81.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
@@ -25,8 +26,11 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "build:web": "expo export --platform web && node scripts/prepare-web-dist.mjs",
-    "build:apk": "npx eas-cli build --platform android --profile preview"
+    "typecheck": "tsc --noEmit",
+    "build:web": "tsc --noEmit && expo export --platform web && node scripts/prepare-web-dist.mjs",
+    "build:apk": "tsc --noEmit && npx eas-cli build --platform android --profile preview",
+    "ota:preview": "tsc --noEmit && npx eas-cli update --channel preview --environment preview",
+    "ota:production": "tsc --noEmit && npx eas-cli update --channel production --environment production"
   },
   "private": true
 }

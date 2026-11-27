@@ -26,6 +26,7 @@ import {
   Thermometer,
   Wifi,
 } from 'lucide-react-native';
+import * as Updates from 'expo-updates';
 import { useMobileTelemetry } from '../hooks/useMobileTelemetry';
 import { EcGaugeSvg, FarmOneSvg, FarmTwoSvg } from '../components/graphics/NativeGraphics';
 import type { ActuatorId, DosingMode, ScreenTab } from '../types/telemetry';
@@ -68,6 +69,31 @@ export const AutogrowMobileApp: React.FC = () => {
   const [tokenInput, setTokenInput] = useState<string>('');
   const [pairingError, setPairingError] = useState<string | null>(null);
   const [pairingStatusMsg, setPairingStatusMsg] = useState<string | null>(null);
+  const [otaStatusMsg, setOtaStatusMsg] = useState<string | null>(null);
+  const [isCheckingOta, setIsCheckingOta] = useState<boolean>(false);
+
+  const handleCheckOtaUpdate = async () => {
+    if (Platform.OS === 'web' || !Updates.isEnabled) {
+      setOtaStatusMsg('OTA updates run automatically inside installed APK / store builds.');
+      return;
+    }
+    setIsCheckingOta(true);
+    setOtaStatusMsg('Checking Expo Cloud CDN for updates...');
+    try {
+      const check = await Updates.checkForUpdateAsync();
+      if (!check.isAvailable) {
+        setOtaStatusMsg('You already have the latest version installed.');
+        return;
+      }
+      setOtaStatusMsg('Downloading new update from Expo Cloud CDN...');
+      await Updates.fetchUpdateAsync();
+      await Updates.reloadAsync();
+    } catch {
+      setOtaStatusMsg('Unable to reach Expo Cloud CDN right now. Try again later.');
+    } finally {
+      setIsCheckingOta(false);
+    }
+  };
 
   const stagePresets = [
     { label: 'Seedling', target: 0.8 },
@@ -619,6 +645,29 @@ export const AutogrowMobileApp: React.FC = () => {
 
                 <TouchableOpacity style={styles.secondaryOutlineBtn} onPress={handleClearCredentials}>
                   <Text style={styles.secondaryOutlineText}>Wipe Credentials & Use Safe Demo</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.whiteCard}>
+                <Text style={{ fontSize: 13, fontWeight: '800', color: '#111827', marginBottom: 4 }}>
+                  App Version & Cloud OTA Updates
+                </Text>
+                <Text style={{ fontSize: 11.5, color: '#6B7280', marginBottom: 8 }}>
+                  Version 1.0.0 · Channel: {Updates.channel || (Platform.OS === 'web' ? 'web' : 'expo-go / local')}
+                </Text>
+                {otaStatusMsg && (
+                  <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#15803D', marginBottom: 8 }}>
+                    {otaStatusMsg}
+                  </Text>
+                )}
+                <TouchableOpacity
+                  style={styles.secondaryOutlineBtn}
+                  disabled={isCheckingOta}
+                  onPress={handleCheckOtaUpdate}
+                >
+                  <Text style={styles.secondaryOutlineText}>
+                    {isCheckingOta ? 'Checking...' : 'Check for OTA Update'}
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>
