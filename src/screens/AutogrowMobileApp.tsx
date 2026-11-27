@@ -1,11 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Modal,
   Platform,
   ScrollView,
-  StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   useWindowDimensions,
   View,
@@ -28,15 +26,41 @@ import {
 } from 'lucide-react-native';
 import * as Updates from 'expo-updates';
 import { useMobileTelemetry } from '../hooks/useMobileTelemetry';
-import { EcGaugeSvg, FarmOneSvg, FarmTwoSvg } from '../components/graphics/NativeGraphics';
-import type { ActuatorId, DosingMode, ScreenTab } from '../types/telemetry';
+import { EcGaugeSvg } from '../components/graphics/NativeGraphics';
+import {
+  AddDeviceView,
+  AddFarmView,
+  ControllersListView,
+  FacilitiesListView,
+  FarmsHomeView,
+} from '../components/HierarchyScreens';
+import { SENSOR_SPECS } from '../data/farmsSeed';
+import type {
+  ActuatorId,
+  AttachedSensor,
+  DosingMode,
+  ScreenTab,
+  SensorType,
+} from '../types/telemetry';
 import { clampTargetEc } from '../utils/security';
+import { mobileStyles as styles } from '../styles/mobileStyles';
 
 export const AutogrowMobileApp: React.FC = () => {
   const { width } = useWindowDimensions();
   const isWideWeb = Platform.OS === 'web' && width > 560;
 
   const {
+    farms,
+    selectedFarm,
+    selectedFacility,
+    selectedController,
+    selectFarm,
+    selectFacility,
+    selectController,
+    addFarm,
+    addFacility,
+    linkControllerDevice,
+    attachSensorToController,
     metrics,
     actuators,
     activeAlarms,
@@ -44,17 +68,23 @@ export const AutogrowMobileApp: React.FC = () => {
     connectionMode,
     endpointUrl,
     hasToken,
-    configureConnection,
     resetToDemoMode,
     triggerActuatorPulse,
     acknowledgeAlarm,
   } = useMobileTelemetry();
 
   const [activeScreen, setActiveScreen] = useState<ScreenTab>('farms');
+  const [returnScreen, setReturnScreen] = useState<ScreenTab>('farms');
   const [dosingMode, setDosingMode] = useState<DosingMode>('Auto');
   const [selectedStage, setSelectedStage] = useState<string>('Bloom');
   const [targetEC, setTargetEC] = useState<number>(setpoint.target_ec || 1.8);
   const [lastDoseMsg, setLastDoseMsg] = useState<string>('12 mins ago');
+  const [showAttachSensorMenu, setShowAttachSensorMenu] = useState<boolean>(false);
+
+  // Sync Target EC whenever the selected Facility/Controller changes
+  useEffect(() => {
+    setTargetEC(clampTargetEc(setpoint.target_ec || 1.8));
+  }, [setpoint.target_ec, selectedFacility.id, selectedController.id]);
 
   // Mandatory Two-Step Safety Confirmation before any pump/valve command
   const [pendingPulse, setPendingPulse] = useState<{
@@ -64,11 +94,7 @@ export const AutogrowMobileApp: React.FC = () => {
   } | null>(null);
   const [pulseFeedback, setPulseFeedback] = useState<string | null>(null);
 
-  // Secure Endpoint Pairing Form State
-  const [urlInput, setUrlInput] = useState<string>(endpointUrl);
-  const [tokenInput, setTokenInput] = useState<string>('');
-  const [pairingError, setPairingError] = useState<string | null>(null);
-  const [pairingStatusMsg, setPairingStatusMsg] = useState<string | null>(null);
+  // Cloud OTA Updater Feedback
   const [otaStatusMsg, setOtaStatusMsg] = useState<string | null>(null);
   const [isCheckingOta, setIsCheckingOta] = useState<boolean>(false);
 
@@ -119,36 +145,17 @@ export const AutogrowMobileApp: React.FC = () => {
     setPendingPulse(null);
     const ok = await triggerActuatorPulse(actuatorId, durationSec);
     if (ok) {
-      setLastDoseMsg(`Just now (${label} · ${durationSec}s)`);
+      setLastDoseMsg(`Just now (${selectedController.serial} · ${label} · ${durationSec}s)`);
       setPulseFeedback(`Dispatched ${durationSec}s bounded pulse to ${label}`);
     } else {
-      setPulseFeedback(`Command rejected or Edge Server unreachable.`);
+      setPulseFeedback('Command rejected or Edge Server unreachable.');
     }
     setTimeout(() => setPulseFeedback(null), 2800);
   };
 
-  const handleSaveConnection = async () => {
-    setPairingError(null);
-    setPairingStatusMsg(null);
-    const res = await configureConnection(urlInput, tokenInput);
-    if (!res.ok) {
-      setPairingError(res.error);
-      return;
-    }
-    setTokenInput('');
-    setPairingStatusMsg(
-      urlInput.trim()
-        ? 'Secure endpoint validated and stored cleanly.'
-        : 'Switched to Safe Demo Simulation Mode.'
-    );
-  };
-
-  const handleClearCredentials = async () => {
-    await resetToDemoMode();
-    setUrlInput('');
-    setTokenInput('');
-    setPairingError(null);
-    setPairingStatusMsg('Credentials cleared. Running in Safe Demo Mode.');
+  const openAddDeviceFlow = (from: ScreenTab) => {
+    setReturnScreen(from);
+    setActiveScreen('pairing');
   };
 
   const statusBadgeText =
@@ -174,129 +181,249 @@ export const AutogrowMobileApp: React.FC = () => {
         ? '#E0F2FE'
         : '#FEF3C7';
 
+  const getLiveSensorDisplayValue = (sensor: AttachedSensor): string => {
+    switch (sensor.type) {
+      case 'ec':
+        return metrics.ec.toFixed(2);
+      case 'ph':
+        return metrics.ph.toFixed(2);
+      case 'vpd':
+        return metrics.vpd.toFixed(2);
+      case 'vwc':
+        return metrics.vwc.toFixed(1);
+      case 'temp':
+        return metrics.temp_water.toFixed(1);
+      case 'co2':
+        return String(metrics.co2);
+      default:
+        return String(sensor.value);
+    }
+  };
+
+  const activeScopeLabel = `${selectedFarm.name} › ${selectedFacility.name.split('·')[0].trim()} › ${selectedController.model} (${selectedController.serial})`;
+
   return (
     <SafeAreaView style={[styles.safeRoot, isWideWeb && styles.wideRoot]}>
       <View style={[styles.phoneContainer, isWideWeb && styles.phoneDesktopFrame]}>
-        {/* Main Scrollable Screen Body */}
         <ScrollView style={styles.scrollBody} contentContainerStyle={styles.scrollContent}>
-          {/* ================= SCREEN 1: MY FARMS ================= */}
+          {/* ================= LEVEL 1: MY FARMS / PLACES ================= */}
           {activeScreen === 'farms' && (
-            <View style={styles.screenGap}>
-              <View style={styles.rowBetweenStart}>
-                <View>
-                  <Text style={styles.pageTitle}>My farms</Text>
-                  <View style={styles.liveSubtitleRow}>
-                    <View style={[styles.dotIndicator, { backgroundColor: '#15803D' }]} />
-                    <Text style={styles.liveSubtitle}>
-                      {connectionMode === 'DEMO_SAFE' ? 'Safe Demo Telemetry Active' : 'Live Edge Telemetry'}
-                    </Text>
-                  </View>
-                </View>
-
-                <View style={[styles.pillBadge, { backgroundColor: statusBadgeBg }]}>
-                  <Text style={[styles.pillBadgeText, { color: statusBadgeColor }]}>{statusBadgeText}</Text>
-                </View>
-              </View>
-
-              <TouchableOpacity
-                style={styles.primaryDarkBtn}
-                onPress={() => setActiveScreen('pairing')}
-                activeOpacity={0.85}
-              >
-                <Plus size={16} color="#FFFFFF" />
-                <Text style={styles.primaryDarkBtnText}>Connect Edge / Pair Device</Text>
-              </TouchableOpacity>
-
-              {/* 3 Summary KPI Cards */}
-              <View style={styles.kpiRow3}>
-                <View style={styles.kpiCard}>
-                  <Text style={styles.kpiLabel}>Tanks</Text>
-                  <Text style={styles.kpiValue}>10</Text>
-                </View>
-                <View style={styles.kpiCard}>
-                  <Text style={[styles.kpiLabel, activeAlarms.length > 0 && { color: '#DC2626' }]}>Alarms</Text>
-                  <Text style={[styles.kpiValue, activeAlarms.length > 0 && { color: '#DC2626' }]}>
-                    {activeAlarms.length}
-                  </Text>
-                </View>
-                <View style={styles.kpiCard}>
-                  <Text style={styles.kpiLabel}>Offline</Text>
-                  <Text style={styles.kpiValue}>0</Text>
-                </View>
-              </View>
-
-              {/* Farm 1 Card */}
-              <TouchableOpacity
-                style={styles.farmCard}
-                onPress={() => setActiveScreen('telemetry')}
-                activeOpacity={0.88}
-              >
-                <View style={styles.farmArtWrap}>
-                  <FarmOneSvg />
-                </View>
-                <View style={styles.rowBetweenCenter}>
-                  <View style={[styles.pillBadge, { backgroundColor: '#DCFCE7' }]}>
-                    <Text style={[styles.pillBadgeText, { color: '#15803D' }]}>ALL ONLINE</Text>
-                  </View>
-                  <Text style={styles.mutedSmall}>Cameron Highlands</Text>
-                </View>
-                <Text style={styles.farmTitle}>Highlands Hydroponics</Text>
-                <View style={styles.farmCardFooter}>
-                  <Text style={styles.farmMeta}>4 Tanks Active</Text>
-                  <Text style={styles.farmMeta}>
-                    Avg EC: <Text style={styles.farmEcStrong}>{metrics.ec.toFixed(2)} mS/cm</Text>
-                  </Text>
-                </View>
-              </TouchableOpacity>
-
-              {/* Farm 2 Card */}
-              <TouchableOpacity
-                style={styles.farmCard}
-                onPress={() => setActiveScreen('telemetry')}
-                activeOpacity={0.88}
-              >
-                <View style={styles.farmArtWrap}>
-                  <FarmTwoSvg />
-                </View>
-                <View style={styles.rowBetweenCenter}>
-                  <View style={[styles.pillBadge, { backgroundColor: '#FEF3C7' }]}>
-                    <Text style={[styles.pillBadgeText, { color: '#B45309' }]}>1 ATTENTION</Text>
-                  </View>
-                  <Text style={styles.mutedSmall}>Genting Highlands</Text>
-                </View>
-                <Text style={styles.farmTitle}>Pahang Berry Bay</Text>
-                <View style={styles.farmCardFooter}>
-                  <Text style={styles.farmMeta}>6 Tanks Active</Text>
-                  <Text style={styles.farmMeta}>
-                    Avg EC: <Text style={styles.farmEcStrong}>2.12 mS/cm</Text>
-                  </Text>
-                </View>
-              </TouchableOpacity>
-            </View>
+            <FarmsHomeView
+              farms={farms}
+              activeAlarmsCount={activeAlarms.length}
+              connectionMode={connectionMode}
+              statusBadgeText={statusBadgeText}
+              statusBadgeColor={statusBadgeColor}
+              statusBadgeBg={statusBadgeBg}
+              onOpenFarm={(farmId) => {
+                selectFarm(farmId);
+                setActiveScreen('facilities');
+              }}
+              onOpenAddFarm={() => setActiveScreen('add_farm')}
+              onOpenAddDevice={() => openAddDeviceFlow('farms')}
+            />
           )}
 
-          {/* ================= SCREEN 2: TANK TELEMETRY ================= */}
+          {/* ================= LEVEL 2: FACILITIES IN CLICKED FARM ================= */}
+          {activeScreen === 'facilities' && (
+            <FacilitiesListView
+              farm={selectedFarm}
+              onBackToFarms={() => setActiveScreen('farms')}
+              onOpenFacility={(facilityId) => {
+                selectFacility(facilityId);
+                setActiveScreen('controllers');
+              }}
+              onOpenAddDeviceForFarm={() => openAddDeviceFlow('facilities')}
+              onAddFacility={(farmId, input) => {
+                const res = addFacility(farmId, input);
+                if (res.ok) {
+                  setActiveScreen('controllers');
+                }
+                return res;
+              }}
+            />
+          )}
+
+          {/* ================= LEVEL 3: CONTROLLERS IN CLICKED FACILITY ================= */}
+          {activeScreen === 'controllers' && (
+            <ControllersListView
+              farm={selectedFarm}
+              facility={selectedFacility}
+              selectedControllerId={selectedController.id}
+              onBackToFacilities={() => setActiveScreen('facilities')}
+              onJumpToFarms={() => setActiveScreen('farms')}
+              onSelectController={(controllerId) => {
+                selectController(controllerId);
+                setActiveScreen('telemetry');
+              }}
+              onLinkControllerToFacility={() => openAddDeviceFlow('controllers')}
+            />
+          )}
+
+          {/* ================= LEVEL 4: SELECTED CONTROLLER SENSORS & LIVE TELEMETRY ================= */}
           {activeScreen === 'telemetry' && (
             <View style={styles.screenGap}>
               <View style={styles.rowBetweenCenter}>
-                <TouchableOpacity onPress={() => setActiveScreen('farms')} style={styles.backLinkRow}>
+                <TouchableOpacity
+                  onPress={() => setActiveScreen('controllers')}
+                  style={styles.backLinkRow}
+                >
                   <ArrowLeft size={14} color="#15803D" />
-                  <Text style={styles.backLinkText}>All farms</Text>
+                  <Text style={styles.backLinkText}>Controllers</Text>
                 </TouchableOpacity>
-                <View style={[styles.pillBadge, { backgroundColor: '#DCFCE7' }]}>
-                  <Text style={[styles.pillBadgeText, { color: '#15803D' }]}>LIVE TELEMETRY</Text>
+                <View style={styles.rowGap8}>
+                  <TouchableOpacity
+                    onPress={() => setActiveScreen('facilities')}
+                    style={styles.crumbChip}
+                  >
+                    <Text style={styles.crumbChipText}>Facilities</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => setActiveScreen('farms')}
+                    style={styles.crumbChip}
+                  >
+                    <Text style={styles.crumbChipText}>All Farms</Text>
+                  </TouchableOpacity>
                 </View>
               </View>
 
-              <View>
-                <Text style={styles.sectionHeading}>Tank 1 - Bloom NFT</Text>
-                <Text style={styles.mutedSmall}>Highlands Hydroponics · Zone 01</Text>
+              {/* Active Controller Hardware Scope Card */}
+              <View style={styles.scopeBanner}>
+                <Text style={styles.scopePathText}>
+                  {selectedFarm.name} › {selectedFacility.name}
+                </Text>
+                <View style={styles.rowBetweenCenter}>
+                  <Text style={styles.scopeCtrlTitle}>{selectedController.model}</Text>
+                  <Text style={styles.scopeCtrlMeta}>{selectedController.serial}</Text>
+                </View>
+                <Text style={{ fontSize: 11, color: '#CBD5E1' }}>
+                  IP {selectedController.ipAddress} · {selectedController.rssi} dBm · FW{' '}
+                  {selectedController.firmware} · {selectedController.doseCountHour} DC/h
+                </Text>
+                <View style={[styles.actionPairRow, { marginTop: 4 }]}>
+                  <TouchableOpacity
+                    style={[
+                      styles.secondaryOutlineBtn,
+                      {
+                        flex: 1,
+                        marginTop: 0,
+                        paddingVertical: 7,
+                        backgroundColor: '#1E293B',
+                        borderColor: '#334155',
+                      },
+                    ]}
+                    onPress={() => openAddDeviceFlow('telemetry')}
+                  >
+                    <Wifi size={12} color="#34D399" />
+                    <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: '700' }}>
+                      Link Edge / OTA
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.primaryEmeraldBtn, { flex: 1, paddingVertical: 7 }]}
+                    onPress={() => setActiveScreen('dosing')}
+                  >
+                    <Droplet size={12} color="#FFFFFF" />
+                    <Text style={{ color: '#FFFFFF', fontSize: 11, fontWeight: '800' }}>
+                      Dosing Controls
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </View>
 
-              {/* Curved EC Sweep Gauge */}
+              {/* Controller's Attached Sensors Section */}
+              <View style={styles.rowBetweenCenter}>
+                <View>
+                  <Text style={styles.sectionHeading}>
+                    Attached Sensors ({selectedController.sensors.length})
+                  </Text>
+                  <Text style={styles.mutedSmall}>
+                    Probes wired to {selectedController.serial}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => setShowAttachSensorMenu((v) => !v)}
+                  style={styles.crumbChip}
+                >
+                  <Text style={[styles.crumbChipText, { color: '#15803D' }]}>
+                    + Attach Sensor
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {showAttachSensorMenu && (
+                <View style={styles.whiteCard}>
+                  <Text style={styles.cardSubTitle}>
+                    Attach New Probe to {selectedController.serial}:
+                  </Text>
+                  <View style={styles.presetRow}>
+                    {(Object.keys(SENSOR_SPECS) as SensorType[]).map((type) => (
+                      <TouchableOpacity
+                        key={type}
+                        style={styles.presetBtn}
+                        onPress={() => {
+                          attachSensorToController(
+                            selectedFarm.id,
+                            selectedFacility.id,
+                            selectedController.id,
+                            type
+                          );
+                          setShowAttachSensorMenu(false);
+                        }}
+                      >
+                        <Text style={styles.presetText}>+ {type.toUpperCase()}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              {selectedController.sensors.map((sensor) => {
+                const isAlert = sensor.status === 'ALERT';
+                return (
+                  <View
+                    key={sensor.id}
+                    style={[styles.listCard, isAlert && { borderColor: '#FCD34D' }]}
+                  >
+                    <View style={styles.rowBetweenCenter}>
+                      <Text style={{ fontSize: 13.5, fontWeight: '800', color: '#111827', flex: 1 }}>
+                        {sensor.name}
+                      </Text>
+                      <View style={styles.pinBadge}>
+                        <Text style={styles.pinBadgeText}>{sensor.pin}</Text>
+                      </View>
+                    </View>
+                    <View style={styles.rowBetweenCenter}>
+                      <Text style={{ fontSize: 18, fontWeight: '900', color: '#15803D' }}>
+                        {getLiveSensorDisplayValue(sensor)}{' '}
+                        <Text style={{ fontSize: 11.5, color: '#6B7280', fontWeight: '700' }}>
+                          {sensor.unit}
+                        </Text>
+                      </Text>
+                      <View
+                        style={[
+                          styles.pillBadge,
+                          { backgroundColor: isAlert ? '#FEF3C7' : '#DCFCE7' },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.pillBadgeText,
+                            { color: isAlert ? '#B45309' : '#15803D' },
+                          ]}
+                        >
+                          {sensor.status}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                );
+              })}
+
+              {/* Curved EC Sweep Gauge & Target Stepper */}
               <View style={styles.whiteCardCenter}>
                 <Text style={styles.cardUpperLabel}>ELECTRICAL CONDUCTIVITY (EC)</Text>
-                <EcGaugeSvg ec={metrics.ec} target={targetEC} lowLimit={1.4} highLimit={2.2} />
+                <EcGaugeSvg ec={metrics.ec} target={targetEC} lowLimit={1.4} highLimit={2.4} />
                 <View style={styles.stepperRow}>
                   <TouchableOpacity
                     style={styles.stepCircleBtn}
@@ -390,9 +517,9 @@ export const AutogrowMobileApp: React.FC = () => {
           {activeScreen === 'dosing' && (
             <View style={styles.screenGap}>
               <View style={styles.rowBetweenCenter}>
-                <View>
+                <View style={{ flex: 1 }}>
                   <Text style={styles.sectionHeading}>Dosing Controls</Text>
-                  <Text style={styles.mutedSmall}>4-Channel Closed-Loop · Two-Step Safety Guard</Text>
+                  <Text style={styles.mutedSmall}>{activeScopeLabel}</Text>
                 </View>
                 <View style={[styles.pillBadge, { backgroundColor: isInterlockLocked ? '#FEE2E2' : '#DCFCE7' }]}>
                   <Text style={[styles.pillBadgeText, { color: isInterlockLocked ? '#DC2626' : '#15803D' }]}>
@@ -487,9 +614,9 @@ export const AutogrowMobileApp: React.FC = () => {
           {activeScreen === 'substrate' && (
             <View style={styles.screenGap}>
               <View style={styles.rowBetweenCenter}>
-                <View>
+                <View style={{ flex: 1 }}>
                   <Text style={styles.sectionHeading}>Substrate Root-Zone</Text>
-                  <Text style={styles.mutedSmall}>Grodan 100cm Rockwool Slab Sensor</Text>
+                  <Text style={styles.mutedSmall}>{activeScopeLabel}</Text>
                 </View>
                 <View style={[styles.pillBadge, { backgroundColor: '#DCFCE7' }]}>
                   <Text style={[styles.pillBadgeText, { color: '#15803D' }]}>TDR PROBE</Text>
@@ -513,7 +640,7 @@ export const AutogrowMobileApp: React.FC = () => {
                 </View>
                 <View style={styles.metricTile}>
                   <Text style={styles.metricTileLabel}>Slab Temp</Text>
-                  <Text style={styles.metricTileVal}>20.8°C</Text>
+                  <Text style={styles.metricTileVal}>{metrics.temp_water.toFixed(1)}°C</Text>
                   <Text style={styles.metricOkText}>Within Root Range</Text>
                 </View>
               </View>
@@ -572,105 +699,36 @@ export const AutogrowMobileApp: React.FC = () => {
             </View>
           )}
 
-          {/* ================= SCREEN 6: SECURE EDGE PAIRING & CONNECTION ================= */}
+          {/* ================= ADD FARM / PLACE SCREEN ================= */}
+          {activeScreen === 'add_farm' && (
+            <AddFarmView
+              onBack={() => setActiveScreen('farms')}
+              onCreateFarm={(input) => {
+                const res = addFarm(input);
+                if (res.ok) {
+                  setActiveScreen('facilities');
+                }
+                return res;
+              }}
+            />
+          )}
+
+          {/* ================= ADD & LINK CONTROLLER DEVICE SCREEN ================= */}
           {activeScreen === 'pairing' && (
-            <View style={styles.screenGap}>
-              <View style={styles.rowBetweenCenter}>
-                <TouchableOpacity onPress={() => setActiveScreen('farms')} style={styles.backLinkRow}>
-                  <ArrowLeft size={14} color="#15803D" />
-                  <Text style={styles.backLinkText}>Back to Farms</Text>
-                </TouchableOpacity>
-                <View style={[styles.pillBadge, { backgroundColor: '#DCFCE7' }]}>
-                  <Text style={[styles.pillBadgeText, { color: '#15803D' }]}>TLS + SECURE STORE</Text>
-                </View>
-              </View>
-
-              <View>
-                <Text style={styles.sectionHeading}>Secure Edge Pairing</Text>
-                <Text style={styles.mutedSmall}>
-                  Connect via encrypted HTTPS tunnel (recommended for remote access) or private farm Wi-Fi LAN IP.
-                </Text>
-              </View>
-
-              <View style={styles.whiteCard}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                  <ShieldCheck size={18} color="#15803D" />
-                  <Text style={{ fontSize: 13, fontWeight: '800', color: '#111827' }}>
-                    Connection Security Policy
-                  </Text>
-                </View>
-                <Text style={{ fontSize: 11.5, color: '#4B5563', lineHeight: 17 }}>
-                  • Public internet access strictly requires HTTPS/WSS encryption.{'\n'}
-                  • Credentials are stored encrypted in iOS Keychain / Android Keystore (never web localStorage).{'\n'}
-                  • Leave blank to run in Safe Demo Simulation Mode.
-                </Text>
-              </View>
-
-              <View style={styles.whiteCard}>
-                <Text style={styles.inputLabel}>Edge Server URL (HTTPS or Private LAN)</Text>
-                <TextInput
-                  value={urlInput}
-                  onChangeText={setUrlInput}
-                  placeholder="https://edge.yourfarm.com or http://192.168.1.50:8080"
-                  placeholderTextColor="#9CA3AF"
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  style={styles.textInput}
-                />
-
-                <Text style={[styles.inputLabel, { marginTop: 10 }]}>
-                  Operator API Bearer Token {hasToken ? '(Saved in Vault)' : '(Optional)'}
-                </Text>
-                <TextInput
-                  value={tokenInput}
-                  onChangeText={setTokenInput}
-                  placeholder="Paste operator bearer token"
-                  placeholderTextColor="#9CA3AF"
-                  secureTextEntry
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  style={styles.textInput}
-                />
-
-                {pairingError && <Text style={styles.errorText}>{pairingError}</Text>}
-                {pairingStatusMsg && <Text style={styles.successText}>{pairingStatusMsg}</Text>}
-
-                <TouchableOpacity
-                  style={[styles.primaryDarkBtn, { marginTop: 12, backgroundColor: '#15803D' }]}
-                  onPress={handleSaveConnection}
-                >
-                  <Wifi size={15} color="#FFFFFF" />
-                  <Text style={styles.primaryDarkBtnText}>Save & Connect Safely</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity style={styles.secondaryOutlineBtn} onPress={handleClearCredentials}>
-                  <Text style={styles.secondaryOutlineText}>Wipe Credentials & Use Safe Demo</Text>
-                </TouchableOpacity>
-              </View>
-
-              <View style={styles.whiteCard}>
-                <Text style={{ fontSize: 13, fontWeight: '800', color: '#111827', marginBottom: 4 }}>
-                  App Version & Cloud OTA Updates
-                </Text>
-                <Text style={{ fontSize: 11.5, color: '#6B7280', marginBottom: 8 }}>
-                  Version 1.0.0 · Channel: {Updates.channel || (Platform.OS === 'web' ? 'web' : 'expo-go / local')}
-                </Text>
-                {otaStatusMsg && (
-                  <Text style={{ fontSize: 11.5, fontWeight: '700', color: '#15803D', marginBottom: 8 }}>
-                    {otaStatusMsg}
-                  </Text>
-                )}
-                <TouchableOpacity
-                  style={styles.secondaryOutlineBtn}
-                  disabled={isCheckingOta}
-                  onPress={handleCheckOtaUpdate}
-                >
-                  <Text style={styles.secondaryOutlineText}>
-                    {isCheckingOta ? 'Checking...' : 'Check for OTA Update'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
+            <AddDeviceView
+              farms={farms}
+              initialFarmId={selectedFarm.id}
+              initialFacilityId={selectedFacility.id}
+              endpointUrl={endpointUrl}
+              hasToken={hasToken}
+              onBack={() => setActiveScreen(returnScreen)}
+              onLinkDevice={linkControllerDevice}
+              onOpenLinkedController={() => setActiveScreen('telemetry')}
+              onResetCredentials={resetToDemoMode}
+              otaStatusMsg={otaStatusMsg}
+              isCheckingOta={isCheckingOta}
+              onCheckOtaUpdate={handleCheckOtaUpdate}
+            />
           )}
         </ScrollView>
 
@@ -678,16 +736,30 @@ export const AutogrowMobileApp: React.FC = () => {
         <View style={styles.bottomTabBar}>
           {(
             [
-              { id: 'farms', label: 'Farms', Icon: Layers },
-              { id: 'telemetry', label: 'Telemetry', Icon: Activity },
-              { id: 'dosing', label: 'Dosing', Icon: Droplet },
-              { id: 'substrate', label: 'Substrate', Icon: Sun },
-              { id: 'alarms', label: `Alarms (${activeAlarms.length})`, Icon: Bell },
+              {
+                id: 'farms',
+                label: 'Farms',
+                Icon: Layers,
+                match: ['farms', 'facilities', 'controllers', 'add_farm', 'pairing'],
+              },
+              { id: 'telemetry', label: 'Sensors', Icon: Activity, match: ['telemetry'] },
+              { id: 'dosing', label: 'Dosing', Icon: Droplet, match: ['dosing'] },
+              { id: 'substrate', label: 'Substrate', Icon: Sun, match: ['substrate'] },
+              {
+                id: 'alarms',
+                label: `Alarms (${activeAlarms.length})`,
+                Icon: Bell,
+                match: ['alarms'],
+              },
             ] as const
-          ).map(({ id, label, Icon }) => {
-            const active = activeScreen === id;
+          ).map(({ id, label, Icon, match }) => {
+            const active = (match as readonly string[]).includes(activeScreen);
             return (
-              <TouchableOpacity key={id} style={styles.tabBtn} onPress={() => setActiveScreen(id)}>
+              <TouchableOpacity
+                key={id}
+                style={styles.tabBtn}
+                onPress={() => setActiveScreen(id)}
+              >
                 <Icon size={18} color={active ? '#15803D' : '#6B7280'} />
                 <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>{label}</Text>
               </TouchableOpacity>
@@ -713,9 +785,15 @@ export const AutogrowMobileApp: React.FC = () => {
               <Text style={styles.modalDesc}>
                 You are about to pulse{' '}
                 <Text style={{ fontWeight: '800', color: '#111827' }}>{pendingPulse.label}</Text> (
-                {pendingPulse.actuatorId}) for{' '}
-                <Text style={{ fontWeight: '800', color: '#15803D' }}>{pendingPulse.durationSec}s</Text>.
-                {'\n\n'}
+                {pendingPulse.actuatorId}) on{' '}
+                <Text style={{ fontWeight: '800', color: '#111827' }}>
+                  {selectedController.serial}
+                </Text>{' '}
+                for{' '}
+                <Text style={{ fontWeight: '800', color: '#15803D' }}>
+                  {pendingPulse.durationSec}s
+                </Text>
+                .{'\n\n'}
                 Mode: {connectionMode === 'DEMO_SAFE' ? 'Simulated Demo (Zero live dosing)' : `Live Edge (${endpointUrl})`}.
               </Text>
             )}
@@ -739,225 +817,3 @@ export const AutogrowMobileApp: React.FC = () => {
     </SafeAreaView>
   );
 };
-
-const styles = StyleSheet.create({
-  safeRoot: { flex: 1, backgroundColor: '#F9FAFB' },
-  wideRoot: { backgroundColor: '#0F172A', alignItems: 'center', justifyContent: 'center', paddingVertical: 16 },
-  phoneContainer: { flex: 1, width: '100%', backgroundColor: '#F9FAFB' },
-  phoneDesktopFrame: {
-    maxWidth: 430,
-    width: '100%',
-    borderRadius: 28,
-    overflow: 'hidden',
-    borderWidth: 6,
-    borderColor: '#1E293B',
-  },
-  scrollBody: { flex: 1 },
-  scrollContent: { padding: 16, paddingBottom: 28 },
-  screenGap: { gap: 14 },
-  rowBetweenStart: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
-  rowBetweenCenter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  pageTitle: { fontSize: 24, fontWeight: '800', color: '#111827', letterSpacing: -0.4 },
-  sectionHeading: { fontSize: 20, fontWeight: '800', color: '#111827' },
-  liveSubtitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 },
-  dotIndicator: { width: 7, height: 7, borderRadius: 4 },
-  liveSubtitle: { fontSize: 11.5, fontWeight: '700', color: '#15803D' },
-  mutedSmall: { fontSize: 11.5, color: '#6B7280' },
-  pillBadge: { paddingHorizontal: 9, paddingVertical: 4, borderRadius: 999 },
-  pillBadgeText: { fontSize: 10, fontWeight: '800' },
-  primaryDarkBtn: {
-    backgroundColor: '#111827',
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-  },
-  primaryDarkBtnText: { color: '#FFFFFF', fontSize: 13, fontWeight: '700' },
-  secondaryOutlineBtn: {
-    marginTop: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#D1D5DB',
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  secondaryOutlineText: { fontSize: 12, fontWeight: '700', color: '#374151' },
-  kpiRow3: { flexDirection: 'row', gap: 8 },
-  kpiCard: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-    padding: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    alignItems: 'center',
-  },
-  kpiLabel: { fontSize: 11, color: '#6B7280', fontWeight: '600' },
-  kpiValue: { fontSize: 20, fontWeight: '800', color: '#111827', marginTop: 2 },
-  farmCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    padding: 14,
-    gap: 6,
-  },
-  farmArtWrap: { alignItems: 'center', marginBottom: 4 },
-  farmTitle: { fontSize: 16, fontWeight: '800', color: '#111827' },
-  farmCardFooter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    borderTopWidth: 1,
-    borderTopColor: '#F3F4F6',
-    paddingTop: 8,
-    marginTop: 2,
-  },
-  farmMeta: { fontSize: 12, color: '#4B5563' },
-  farmEcStrong: { color: '#15803D', fontWeight: '800' },
-  backLinkRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  backLinkText: { fontSize: 12.5, fontWeight: '700', color: '#15803D' },
-  whiteCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    padding: 14,
-  },
-  whiteCardCenter: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    padding: 16,
-    alignItems: 'center',
-  },
-  cardUpperLabel: { fontSize: 11, fontWeight: '700', color: '#6B7280', marginBottom: 4 },
-  cardSubTitle: { fontSize: 11.5, fontWeight: '700', color: '#6B7280', marginBottom: 8 },
-  stepperRow: { flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 4 },
-  stepCircleBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: '#F3F4F6',
-    borderWidth: 1,
-    borderColor: '#D1D5DB',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  stepCircleText: { fontSize: 16, fontWeight: '800', color: '#111827' },
-  targetLabel: { fontSize: 13, color: '#374151', fontWeight: '600' },
-  grid2: { flexDirection: 'row', gap: 8 },
-  metricTile: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    padding: 12,
-  },
-  metricIconRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 },
-  metricTileLabel: { fontSize: 11, color: '#6B7280', fontWeight: '600' },
-  metricTileVal: { fontSize: 18, fontWeight: '800', color: '#111827', marginVertical: 2 },
-  metricOkText: { fontSize: 10.5, color: '#15803D', fontWeight: '700' },
-  climateMicroLabel: { fontSize: 9.5, color: '#6B7280', fontWeight: '700' },
-  climateVal: { fontSize: 15, fontWeight: '800', color: '#111827', marginTop: 2 },
-  presetRow: { flexDirection: 'row', gap: 6 },
-  presetBtn: {
-    flex: 1,
-    paddingVertical: 7,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    backgroundColor: '#F9FAFB',
-    alignItems: 'center',
-  },
-  presetBtnActive: { borderColor: '#76b82a', backgroundColor: '#F0FDF4' },
-  presetText: { fontSize: 11, fontWeight: '700', color: '#4B5563' },
-  presetTextActive: { color: '#15803D' },
-  pumpGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  pumpCard: {
-    width: '48%',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    padding: 12,
-    gap: 5,
-  },
-  pumpCardActive: { borderColor: '#15803D', backgroundColor: '#F0FDF4' },
-  pumpIdLabel: { fontSize: 9.5, fontWeight: '700', color: '#6B7280' },
-  pumpName: { fontSize: 13, fontWeight: '800', color: '#111827' },
-  pumpState: { fontSize: 10.5, fontWeight: '700', color: '#6B7280' },
-  smallPulseBtn: { backgroundColor: '#111827', paddingHorizontal: 9, paddingVertical: 5, borderRadius: 6 },
-  smallPulseBtnText: { color: '#FFFFFF', fontSize: 10.5, fontWeight: '700' },
-  modeChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, backgroundColor: '#F3F4F6' },
-  modeChipText: { fontSize: 11, fontWeight: '700', color: '#4B5563' },
-  feedbackBanner: {
-    backgroundColor: '#ECFDF5',
-    borderWidth: 1,
-    borderColor: '#A7F3D0',
-    padding: 10,
-    borderRadius: 8,
-  },
-  feedbackBannerText: { fontSize: 11.5, fontWeight: '700', color: '#065F46' },
-  hugeMonoValue: { fontSize: 38, fontWeight: '900', color: '#111827', marginVertical: 4 },
-  progressTrack: {
-    width: '100%',
-    height: 8,
-    backgroundColor: '#E5E7EB',
-    borderRadius: 999,
-    marginTop: 12,
-    overflow: 'hidden',
-  },
-  progressFill: { height: '100%', backgroundColor: '#15803D', borderRadius: 999 },
-  inputLabel: { fontSize: 11.5, fontWeight: '700', color: '#374151', marginBottom: 4 },
-  textInput: {
-    borderWidth: 1,
-    borderColor: '#D1D5DB',
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    fontSize: 12.5,
-    color: '#111827',
-    backgroundColor: '#FFFFFF',
-  },
-  errorText: { fontSize: 11.5, fontWeight: '700', color: '#DC2626', marginTop: 8 },
-  successText: { fontSize: 11.5, fontWeight: '700', color: '#15803D', marginTop: 8 },
-  bottomTabBar: {
-    height: 60,
-    backgroundColor: '#FFFFFF',
-    borderTopWidth: 1,
-    borderTopColor: '#E5E7EB',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-around',
-    paddingHorizontal: 6,
-  },
-  tabBtn: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 3 },
-  tabLabel: { fontSize: 10, color: '#6B7280', fontWeight: '600' },
-  tabLabelActive: { color: '#15803D', fontWeight: '800' },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.65)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 20,
-  },
-  modalBox: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
-    padding: 20,
-    width: '100%',
-    maxWidth: 380,
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-  },
-  modalTitle: { fontSize: 16, fontWeight: '800', color: '#111827' },
-  modalDesc: { fontSize: 12.5, color: '#4B5563', lineHeight: 18 },
-});
